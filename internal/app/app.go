@@ -73,10 +73,7 @@ func Run(cfg Config) error {
 		return fmt.Errorf("no URLs provided")
 	}
 
-		return asyncDownload(cfg, urls)
-	
-
-	
+	return asyncDownload(cfg, urls)
 }
 
 // asyncDownload downloads all URLs concurrently using goroutines.
