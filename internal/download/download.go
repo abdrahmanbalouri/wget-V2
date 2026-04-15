@@ -76,7 +76,7 @@ func File(rawURL string, opt Options) error {
 		bar := progressbar.DefaultBytes(resp.ContentLength, "")
 		_, err = io.Copy(io.MultiWriter(f, bar), src)
 		fmt.Println()
-	if err != nil {
+	  if err != nil {
 		return fmt.Errorf("download error: %w", err)
 	}
 

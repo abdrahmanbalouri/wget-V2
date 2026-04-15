@@ -33,8 +33,7 @@ func Run(cfg Config) error {
 		if err != nil {
 			return err
 		}
-		os.Stdout = log
-		os.Stderr = log
+		
 		defer log.Close()
 
 		os.Setenv("WGET_BG", "1")
@@ -74,7 +73,6 @@ func Run(cfg Config) error {
 		return fmt.Errorf("no URLs provided")
 	}
 
-	// -i with multiple URLs: download all at once (async).
 		return asyncDownload(cfg, urls)
 	
 
