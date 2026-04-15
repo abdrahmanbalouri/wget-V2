@@ -18,8 +18,8 @@ func main() {
 	pflag.BoolVarP(&cfg.Background, "background", "B", false, "Background mode")
 	pflag.BoolVar(&cfg.Mirror, "mirror", false, "Mirror website")
 	pflag.BoolVar(&cfg.Convert, "convert-links", false, "Convert links for offline")
-	pflag.StringSliceVarP(&cfg.Reject, "reject", "R", []string{}, "Reject extensions")
-	pflag.StringSliceVarP(&cfg.Exclude, "exclude", "X", []string{}, "Exclude paths")
+	pflag.StringSliceVarP(&cfg.Reject, "reject", "R", nil, "Reject extensions")
+	pflag.StringSliceVarP(&cfg.Exclude, "exclude", "X", nil, "Exclude paths")
 	pflag.Parse()
 
 	cfg.URLs = pflag.Args()

@@ -12,23 +12,20 @@ import (
 	"github.com/gocolly/colly/v2"
 )
 
+// Options for mirroring a website.
 type Options struct {
-	OutputPath string
-	Convert    bool
-	Reject     []string
-	Exclude    []string
+	Convert bool     // --convert-links
+	Reject  []string // -R reject extensions
+	Exclude []string // -X exclude paths
 }
 
+// Run mirrors a website by crawling all pages and saving files locally.
 func Run(base string, opts Options) error {
 	u, err := url.Parse(base)
 	if err != nil {
-		return fmt.Errorf("invalid url: %w", err)
+		return err
 	}
-
 	domain := u.Host
-	if domain == "" {
-		return fmt.Errorf("url has no domain")
-	}
 
 	c := colly.NewCollector(
 		colly.AllowedDomains(domain),
@@ -37,12 +34,7 @@ func Run(base string, opts Options) error {
 	c.SetRequestTimeout(30 * time.Second)
 	c.Limit(&colly.LimitRule{Parallelism: 4, Delay: 500 * time.Millisecond})
 
-	var scrapingErrors []error
-	c.OnError(func(_ *colly.Response, err error) {
-		scrapingErrors = append(scrapingErrors, err)
-		fmt.Fprintf(os.Stderr, "Scraping error: %v\n", err)
-	})
-
+	// Follow links in a, link, img, script tags.
 	c.OnHTML("a[href], link[href], img[src], script[src]", func(e *colly.HTMLElement) {
 		link := e.Attr("href")
 		if link == "" {
@@ -50,66 +42,74 @@ func Run(base string, opts Options) error {
 		}
 
 		abs := e.Request.AbsoluteURL(link)
-		if abs == "" || !strings.HasPrefix(abs, base) {
+		if abs == "" {
 			return
 		}
 
-		lowerAbs := strings.ToLower(abs)
-		for _, r := range opts.Reject {
-			if strings.HasSuffix(lowerAbs, "."+strings.ToLower(r)) {
-				return
-			}
+		parsed, err := url.Parse(abs)
+		if err != nil || parsed.Host != domain {
+			return
 		}
-		for _, x := range opts.Exclude {
-			if strings.Contains(abs, x) {
+
+		// Skip rejected extensions (e.g. --reject=gif).
+		ext := strings.TrimPrefix(path.Ext(parsed.Path), ".")
+		for _, r := range opts.Reject {
+			if strings.EqualFold(ext, r) {
 				return
 			}
 		}
 
-		if err := e.Request.Visit(abs); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to visit %s: %v\n", abs, err)
-			scrapingErrors = append(scrapingErrors, err)
+		// Skip excluded paths (e.g. -X=/img).
+		for _, x := range opts.Exclude {
+			if strings.HasPrefix(parsed.Path, x) {
+				return
+			}
 		}
+
+		e.Request.Visit(abs)
 	})
 
+	// Save each response to a local file.
 	c.OnResponse(func(r *colly.Response) {
-		reqPath := r.Request.URL.Path
-		if reqPath == "" || strings.HasSuffix(reqPath, "/") {
-			reqPath = path.Join(reqPath, "index.html")
+		p := r.Request.URL.Path
+		if p == "" || strings.HasSuffix(p, "/") {
+			p = path.Join(p, "index.html")
 		}
 
-		fPath := filepath.Join(opts.OutputPath, domain, reqPath)
-		if err := os.MkdirAll(filepath.Dir(fPath), 0755); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to create directory for %s: %v\n", fPath, err)
-			scrapingErrors = append(scrapingErrors, err)
-			return
-		}
+		fPath := filepath.Join(domain, p)
+		os.MkdirAll(filepath.Dir(fPath), 0755)
 
 		data := r.Body
-		if opts.Convert && (strings.HasSuffix(fPath, ".html") || strings.HasSuffix(fPath, ".css")) {
-			data = []byte(strings.ReplaceAll(string(data), base, "./"))
+
+		// --convert-links: replace absolute URLs with relative paths.
+		if opts.Convert && isText(fPath) {
+			s := string(data)
+			s = strings.ReplaceAll(s, "https://"+domain+"/", "./")
+			s = strings.ReplaceAll(s, "https://"+domain, "./")
+			s = strings.ReplaceAll(s, "http://"+domain+"/", "./")
+			s = strings.ReplaceAll(s, "http://"+domain, "./")
+			s = strings.ReplaceAll(s, "//"+domain+"/", "./")
+			s = strings.ReplaceAll(s, "//"+domain, "./")
+			data = []byte(s)
 		}
 
-		if err := os.WriteFile(fPath, data, 0644); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to write %s: %v\n", fPath, err)
-			scrapingErrors = append(scrapingErrors, err)
-			return
-		}
-
-		fmt.Printf("Mirrored: %s\n", fPath)
+		os.WriteFile(fPath, data, 0644)
+		fmt.Printf("saved: %s\n", fPath)
 	})
 
-	fmt.Printf("🚀 Starting mirror of %s\n", base)
+	fmt.Printf("Mirroring %s ...\n", base)
 	if err := c.Visit(base); err != nil {
-		return fmt.Errorf("failed to start mirror: %w", err)
+		return err
 	}
-
 	c.Wait()
-	if len(scrapingErrors) > 0 {
-		fmt.Fprintf(os.Stderr, "⚠️  Mirror completed with %d errors\n", len(scrapingErrors))
-		return fmt.Errorf("mirror had %d errors during scraping", len(scrapingErrors))
-	}
-
-	fmt.Println("✅ Mirror completed successfully!")
+	fmt.Println("Mirror done.")
 	return nil
+}
+
+// isText checks if a file is HTML, CSS, or JS (for link conversion).
+func isText(name string) bool {
+	name = strings.ToLower(name)
+	return strings.HasSuffix(name, ".html") ||
+		strings.HasSuffix(name, ".css") ||
+		strings.HasSuffix(name, ".js")
 }

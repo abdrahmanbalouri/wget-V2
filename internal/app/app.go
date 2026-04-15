@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 
 	"wget/internal/download"
 	"wget/internal/mirror"
 )
 
+// Config holds all the CLI flags.
 type Config struct {
 	Output     string
 	Path       string
@@ -24,75 +26,106 @@ type Config struct {
 }
 
 func Run(cfg Config) error {
-	if cfg.Background {
-		fmt.Println("Output written to wget-log")
-		f, err := os.Create("wget-log")
+	// -B flag: spawn a background child process, parent exits immediately.
+	if cfg.Background && os.Getenv("WGET_BG") == "" {
+		fmt.Println("Output will be written to \"wget-log\".")
+		log, err := os.Create("wget-log")
 		if err != nil {
-			return fmt.Errorf("cannot create wget-log: %w", err)
+			return err
 		}
-		defer f.Close()
-		os.Stdout, os.Stderr = f, f
+		defer log.Close()
+
+		os.Setenv("WGET_BG", "1")
+		p, err := os.StartProcess(os.Args[0], os.Args, &os.ProcAttr{
+			Files: []*os.File{os.Stdin, log, log},
+			Env:   os.Environ(),
+		})
+		if err != nil {
+			return err
+		}
+		p.Release()
+		return nil
 	}
 
+	// Child process keeps Background=true so progress bar is skipped.
+	if os.Getenv("WGET_BG") == "1" {
+		cfg.Background = true
+	}
+
+	// Collect URLs from -i file.
 	urls := cfg.URLs
 	if cfg.Input != "" {
 		f, err := os.Open(cfg.Input)
 		if err != nil {
-			return fmt.Errorf("cannot open input file '%s': %w", cfg.Input, err)
+			return err
 		}
 		defer f.Close()
-
-		s := bufio.NewScanner(f)
-		for s.Scan() {
-			if u := strings.TrimSpace(s.Text()); u != "" {
-				urls = append(urls, u)
+		sc := bufio.NewScanner(f)
+		for sc.Scan() {
+			if line := strings.TrimSpace(sc.Text()); line != "" {
+				urls = append(urls, line)
 			}
-		}
-
-		if err := s.Err(); err != nil {
-			return fmt.Errorf("error reading input file: %w", err)
 		}
 	}
 
 	if len(urls) == 0 {
-		return fmt.Errorf("no URLs provided\nUsage: ./wget [flags] <URL> [URL ...]")
+		return fmt.Errorf("no URLs provided")
 	}
 
-	hasErrors := false
+	// -i with multiple URLs: download all at once (async).
+	if cfg.Input != "" && len(urls) > 1 {
+		return asyncDownload(cfg, urls)
+	}
+
+	// Normal: one URL at a time.
+	for _, u := range urls {
+		if err := process(cfg, u); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// asyncDownload downloads all URLs concurrently using goroutines.
+func asyncDownload(cfg Config, urls []string) error {
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var errs []error
 
 	for _, u := range urls {
-		var err error
-		if cfg.Mirror {
-			err = mirror.Run(u, mirror.Options{
-				OutputPath: cfg.Path,
-				Convert:    cfg.Convert,
-				Reject:     cfg.Reject,
-				Exclude:    cfg.Exclude,
-			})
-		} else if strings.HasPrefix(u, "ftp://") {
-			err = download.FTP(download.Options{
-				Output: cfg.Output,
-				Path:   cfg.Path,
-				Limit:  cfg.Limit,
-			}, u)
-		} else {
-			err = download.HTTP(download.Options{
-				Output: cfg.Output,
-				Path:   cfg.Path,
-				Limit:  cfg.Limit,
-			}, u)
-		}
-
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to process '%s': %v\n", u, err)
-			hasErrors = true
-			continue
-		}
+		wg.Add(1)
+		go func(url string) {
+			defer wg.Done()
+			if err := process(cfg, url); err != nil {
+				mu.Lock()
+				errs = append(errs, err)
+				mu.Unlock()
+			}
+		}(u)
 	}
+	wg.Wait()
 
-	if hasErrors {
+	fmt.Printf("\nDownload finished: %v\n", urls)
+
+	if len(errs) > 0 {
 		return fmt.Errorf("some downloads failed")
 	}
-
 	return nil
+}
+
+// process handles a single URL: mirror or download.
+func process(cfg Config, u string) error {
+	if cfg.Mirror {
+		return mirror.Run(u, mirror.Options{
+			Convert: cfg.Convert,
+			Reject:  cfg.Reject,
+			Exclude: cfg.Exclude,
+		})
+	}
+	return download.File(u, download.Options{
+		Output:     cfg.Output,
+		Path:       cfg.Path,
+		Limit:      cfg.Limit,
+		Background: cfg.Background,
+	})
 }

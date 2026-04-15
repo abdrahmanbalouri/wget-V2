@@ -12,134 +12,120 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jlaffaye/ftp"
 	"github.com/schollz/progressbar/v3"
 	"golang.org/x/time/rate"
 )
 
+// Options for downloading a file.
 type Options struct {
-	Output string
-	Path   string
-	Limit  string
+	Output     string // -O rename
+	Path       string // -P directory
+	Limit      string // --rate-limit
+	Background bool   // -B background mode
 }
 
-func HTTP(opt Options, targetURL string) error {
+// File downloads a single URL and saves it to disk.
+func File(rawURL string, opt Options) error {
 	fmt.Printf("start at %s\n", time.Now().Format("2006-01-02 15:04:05"))
+	fmt.Print("sending request, awaiting response... ")
 
-	client := &http.Client{Timeout: 1000 * time.Minute}
-	resp, err := client.Get(targetURL)
+	resp, err := http.Get(rawURL)
 	if err != nil {
-		return fmt.Errorf("error downloading %s: %w", targetURL, err)
+		return fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("http error %d for %s", resp.StatusCode, targetURL)
+	// Print real status and stop if not 200.
+	fmt.Printf("status %s\n", resp.Status)
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("server returned %s", resp.Status)
 	}
 
-	fmt.Printf("sending request, awaiting response... status %d OK\n", resp.StatusCode)
-	sizeMB := float64(resp.ContentLength) / (1024 * 1024)
-	fmt.Printf("content size: %d [~%.2fMB]\n", resp.ContentLength, sizeMB)
+	// Print content size in bytes and MB.
+	mb := float64(resp.ContentLength) / (1024 * 1024)
+	fmt.Printf("content size: %d [~%.2fMB]\n", resp.ContentLength, mb)
 
-	if err := saveStream(resp.Body, targetURL, opt, resp.ContentLength); err != nil {
-		return err
-	}
+	// Determine file name and save path.
+	name := fileName(opt.Output, rawURL)
+	saveTo := buildPath(opt.Path, name)
+	displayTo := displayPath(opt.Path, name)
 
-	fmt.Printf("finished at %s\n", time.Now().Format("2006-01-02 15:04:05"))
-	return nil
-}
+	fmt.Printf("saving file to: %s\n", displayTo)
 
-func FTP(opt Options, rawURL string) error {
-	fmt.Printf("Downloading FTP: %s\n", rawURL)
+	// Create directories if needed.
+	os.MkdirAll(filepath.Dir(saveTo), 0755)
 
-	u, err := url.Parse(rawURL)
+	// Create the output file.
+	f, err := os.Create(saveTo)
 	if err != nil {
-		return fmt.Errorf("error parsing ftp url: %w", err)
-	}
-
-	host := u.Host
-	if host == "" {
-		return fmt.Errorf("invalid ftp url: no host specified")
-	}
-	if !strings.Contains(host, ":") {
-		host += ":21"
-	}
-
-	c, err := ftp.Dial(host, ftp.DialWithTimeout(5*time.Second))
-	if err != nil {
-		return fmt.Errorf("ftp dial failed for %s: %w", host, err)
-	}
-	defer c.Quit()
-
-	if err := c.Login("anonymous", "anonymous"); err != nil {
-		return fmt.Errorf("ftp login failed: %w", err)
-	}
-
-	r, err := c.Retr(u.Path)
-	if err != nil {
-		return fmt.Errorf("ftp retrieve failed for %s: %w", u.Path, err)
-	}
-	defer r.Close()
-
-	if err := saveStream(r, rawURL, opt, -1); err != nil {
-		return err
-	}
-
-	fmt.Printf("finished at %s\n", time.Now().Format("2006-01-02 15:04:05"))
-	return nil
-}
-
-func saveStream(r io.Reader, originalURL string, opt Options, size int64) error {
-	name := opt.Output
-	if name == "" {
-		name = path.Base(originalURL)
-		if name == "" || name == "." {
-			name = "index.html"
-		}
-	}
-
-	fPath := filepath.Join(opt.Path, name)
-	absPath, err := filepath.Abs(fPath)
-	if err != nil {
-		return fmt.Errorf("invalid path: %w", err)
-	}
-
-	if err := os.MkdirAll(filepath.Dir(absPath), 0755); err != nil {
-		return fmt.Errorf("failed to create directory: %w", err)
-	}
-
-	fmt.Printf("saving file to: %s\n", absPath)
-	f, err := os.Create(absPath)
-	if err != nil {
-		return fmt.Errorf("failed to create file: %w", err)
+		return fmt.Errorf("cannot create file: %w", err)
 	}
 	defer f.Close()
 
-	bar := progressbar.DefaultBytes(size, "Downloading")
-	var src io.Reader = r
+	// Apply rate limit if set.
+	var src io.Reader = resp.Body
 	if opt.Limit != "" {
-		l := parseRate(opt.Limit)
-		lim := rate.NewLimiter(rate.Limit(l), int(l))
-		src = &throt{r: r, l: lim}
+		if r := parseRate(opt.Limit); r > 0 {
+			lim := rate.NewLimiter(rate.Limit(r), int(r))
+			src = &throttle{r: src, lim: lim}
+		}
 	}
 
-	bytesWritten, err := io.Copy(io.MultiWriter(f, bar), src)
+	// Download: with progress bar (normal) or silent (background).
+	if opt.Background {
+		_, err = io.Copy(f, src)
+	} else {
+		bar := progressbar.DefaultBytes(resp.ContentLength, "")
+		_, err = io.Copy(io.MultiWriter(f, bar), src)
+		fmt.Println()
+	}
 	if err != nil {
-		return fmt.Errorf("error during download: %w", err)
+		return fmt.Errorf("download error: %w", err)
 	}
 
-	if bytesWritten == 0 && size > 0 {
-		return fmt.Errorf("no bytes downloaded (expected ~%d bytes)", size)
-	}
-
-	fmt.Printf("\nDownloaded [%s]\n", originalURL)
+	fmt.Printf("Downloaded [%s]\n", rawURL)
+	fmt.Printf("finished at %s\n", time.Now().Format("2006-01-02 15:04:05"))
 	return nil
 }
 
+// fileName returns the output file name.
+func fileName(output, rawURL string) string {
+	if output != "" {
+		return output
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "index.html"
+	}
+	name := path.Base(u.Path)
+	if name == "" || name == "." || name == "/" {
+		return "index.html"
+	}
+	return name
+}
+
+// buildPath creates the real file system path (expands ~).
+func buildPath(dir, name string) string {
+	if strings.HasPrefix(dir, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			dir = filepath.Join(home, dir[2:])
+		}
+	}
+	return filepath.Join(dir, name)
+}
+
+// displayPath creates the path shown to the user.
+func displayPath(dir, name string) string {
+	if dir == "" || dir == "." {
+		return "./" + name
+	}
+	return filepath.Join(dir, name)
+}
+
+// parseRate converts "400k" or "2M" to bytes per second.
 func parseRate(s string) int64 {
-	var n int64
+	s = strings.TrimSpace(strings.ToLower(s))
 	mult := int64(1)
-	s = strings.ToLower(s)
 	if strings.HasSuffix(s, "k") {
 		mult = 1024
 		s = s[:len(s)-1]
@@ -147,19 +133,21 @@ func parseRate(s string) int64 {
 		mult = 1024 * 1024
 		s = s[:len(s)-1]
 	}
-	_, _ = fmt.Sscanf(s, "%d", &n)
+	var n int64
+	fmt.Sscanf(s, "%d", &n)
 	return n * mult
 }
 
-type throt struct {
-	r io.Reader
-	l *rate.Limiter
+// throttle wraps a reader to limit read speed.
+type throttle struct {
+	r   io.Reader
+	lim *rate.Limiter
 }
 
-func (t *throt) Read(p []byte) (int, error) {
+func (t *throttle) Read(p []byte) (int, error) {
 	n, err := t.r.Read(p)
 	if n > 0 {
-		_ = t.l.WaitN(context.Background(), n)
+		t.lim.WaitN(context.Background(), n)
 	}
 	return n, err
 }
