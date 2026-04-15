@@ -33,6 +33,8 @@ func Run(cfg Config) error {
 		if err != nil {
 			return err
 		}
+		os.Stdout = log
+		os.Stderr = log
 		defer log.Close()
 
 		os.Setenv("WGET_BG", "1")
@@ -73,17 +75,10 @@ func Run(cfg Config) error {
 	}
 
 	// -i with multiple URLs: download all at once (async).
-	if cfg.Input != "" && len(urls) > 1 {
 		return asyncDownload(cfg, urls)
-	}
+	
 
-	// Normal: one URL at a time.
-	for _, u := range urls {
-		if err := process(cfg, u); err != nil {
-			return err
-		}
-	}
-	return nil
+	
 }
 
 // asyncDownload downloads all URLs concurrently using goroutines.
