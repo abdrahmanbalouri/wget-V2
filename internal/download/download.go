@@ -80,10 +80,11 @@ func download(rawURL string, opt Options) error {
 			fmt.Printf("rate limit: %s => %d B/s\n", opt.Limit, r)
 			// Burst must be >= any single WaitN(n) call.
 			// Use 32KB or the rate itself, whichever is smaller.
-			burst := int(r)
-			if burst > 32*1024 {
-				burst = 32 * 1024
+			if( r < 32*1024){
+				r = 32 * 1024
 			}
+			burst := int(r)
+
 			lim := rate.NewLimiter(rate.Limit(r), burst)
 
 			reader = &throttle{
@@ -163,7 +164,17 @@ func parseRate(s string) int64 {
 	} else if strings.HasSuffix(s, "m") {
 		mult = 1024 * 1024
 		s = strings.TrimSuffix(s, "m")
+	 }else if strings.HasSuffix(s, "g") {
+		mult = 1024 * 1024 * 1024
+		s = strings.TrimSuffix(s, "g")
+	}else if strings.HasSuffix(s, "t") {
+		mult = 1024 * 1024 * 1024 * 1024
+		s = strings.TrimSuffix(s, "t")
+	}else{
+		fmt.Println("invalid format")
+		os.Exit(1)
 	}
+	 
 
 	var n int64
 	fmt.Sscanf(s, "%d", &n)
