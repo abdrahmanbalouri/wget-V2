@@ -1,7 +1,10 @@
 package mirror
 
 import (
+	"bytes"
+	"context"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path"
@@ -12,13 +15,17 @@ import (
 	"time"
 
 	"github.com/gocolly/colly/v2"
+	"github.com/schollz/progressbar/v3"
+	"golang.org/x/time/rate"
 )
 
 // Options for mirroring a website.
 type Options struct {
-	Convert bool     // --convert-links
-	Reject  []string // -R reject extensions
-	Exclude []string // -X exclude paths
+	Convert    bool     // --convert-links
+	Reject     []string // -R reject extensions
+	Exclude    []string // -X exclude paths
+	Background bool     // -B background mode
+	Limit      string   // --rate-limit
 }
 
 // Run mirrors a website by crawling all pages and saving files locally.
@@ -35,7 +42,10 @@ func Run(base string, opts Options) error {
 		colly.Async(true),
 	)
 	c.SetRequestTimeout(30 * time.Second)
-	c.Limit(&colly.LimitRule{Parallelism: 4, Delay: 300 * time.Millisecond})
+	c.Limit(&colly.LimitRule{
+		Parallelism: 4,
+		Delay:       300 * time.Millisecond,
+	})
 
 	// Track saved files for --convert-links.
 	var mu sync.Mutex
@@ -75,9 +85,56 @@ func Run(base string, opts Options) error {
 
 	// Save each response to disk.
 	c.OnResponse(func(r *colly.Response) {
+		if !opts.Background {
+			// Print status and content info like download module
+			fmt.Printf("status %d\n", r.StatusCode)
+		}
+		if r.StatusCode != 200 {
+			if !opts.Background {
+				fmt.Fprintf(os.Stderr, "skipping non-200 response: %s\n", r.Request.URL)
+			}
+			return
+		}
+		size := len(r.Body)
+		if !opts.Background {
+			mb := float64(size) / (1024 * 1024)
+			fmt.Printf("content size: %d [~%.2fMB]\n", size, mb)
+		}
+
 		localPath := urlToLocalPath(domain, r.Request.URL)
-		os.MkdirAll(filepath.Dir(localPath), 0755)
-		if err := os.WriteFile(localPath, r.Body, 0644); err != nil {
+		if !opts.Background {
+			fmt.Printf("saving file to: %s\n", localPath)
+		}
+
+		os.MkdirAll(filepath.Dir(localPath), 0o755)
+
+		// Create the output file.
+		f, err := os.Create(localPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "write error: %s - %v\n", localPath, err)
+			return
+		}
+		defer f.Close()
+
+		// Apply rate limit if set.
+		var src io.Reader = bytes.NewReader(r.Body)
+		if opts.Limit != "" {
+			if r := parseRate(opts.Limit); r > 0 {
+				lim := rate.NewLimiter(rate.Limit(r), int(r))
+				src = &throttle{r: src, lim: lim}
+			}
+		}
+
+		if !opts.Background {
+			// Write with progress bar
+			bar := progressbar.DefaultBytes(int64(size), "Saving "+filepath.Base(localPath))
+			_, err = io.Copy(io.MultiWriter(f, bar), src)
+			fmt.Println()
+		} else {
+			// Write silently
+			_, err = io.Copy(f, src)
+		}
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "write error: %s - %v\n", localPath, err)
 			return
 		}
@@ -86,7 +143,10 @@ func Run(base string, opts Options) error {
 		saved[r.Request.URL.String()] = localPath
 		mu.Unlock()
 
-		fmt.Printf("saved: %s\n", localPath)
+		if !opts.Background {
+			fmt.Printf("saved: %s\n", localPath)
+			fmt.Printf("Downloaded [%s]\n", r.Request.URL)
+		}
 
 		// If it's CSS, extract and queue url() references.
 		if strings.Contains(r.Headers.Get("Content-Type"), "css") {
@@ -109,6 +169,7 @@ func Run(base string, opts Options) error {
 	})
 
 	fmt.Printf("Mirroring %s ...\n", base)
+	fmt.Printf("start at %s\n", time.Now().Format("2006-01-02 15:04:05"))
 	if err := c.Visit(base); err != nil {
 		return err
 	}
@@ -119,6 +180,7 @@ func Run(base string, opts Options) error {
 	}
 
 	fmt.Println("Mirror done.")
+	fmt.Printf("finished at %s\n", time.Now().Format("2006-01-02 15:04:05"))
 	return nil
 }
 
@@ -133,7 +195,7 @@ func isSameHost(host, domain, hostname string) bool {
 func isRejected(urlPath string, reject []string) bool {
 	ext := strings.TrimPrefix(path.Ext(urlPath), ".")
 	for _, r := range reject {
-		if strings.EqualFold(ext, r) {
+		if strings.EqualFold(ext, strings.TrimSpace(r)) {
 			return true
 		}
 	}
@@ -142,7 +204,7 @@ func isRejected(urlPath string, reject []string) bool {
 
 func isExcluded(urlPath string, exclude []string) bool {
 	for _, x := range exclude {
-		if strings.HasPrefix(urlPath, x) {
+		if strings.HasPrefix(urlPath, strings.TrimSpace(x)) {
 			return true
 		}
 	}
@@ -206,7 +268,7 @@ func convertLinks(domain, hostname string, saved map[string]string) {
 			converted = convertHTMLLinks(original, localPath, domain, hostname)
 		}
 		if converted != original {
-			os.WriteFile(localPath, []byte(converted), 0644)
+			os.WriteFile(localPath, []byte(converted), 0o644)
 			fmt.Printf("converted links: %s\n", localPath)
 		}
 	}
@@ -321,4 +383,34 @@ func isTextFile(name string) bool {
 		}
 	}
 	return false
+}
+
+// throttle wraps a reader to limit read speed.
+type throttle struct {
+	r   io.Reader
+	lim *rate.Limiter
+}
+
+func (t *throttle) Read(p []byte) (int, error) {
+	n, err := t.r.Read(p)
+	if n > 0 {
+		t.lim.WaitN(context.Background(), n)
+	}
+	return n, err
+}
+
+// parseRate converts "400k" or "2M" to bytes per second.
+func parseRate(s string) int64 {
+	s = strings.TrimSpace(strings.ToLower(s))
+	mult := int64(1)
+	if strings.HasSuffix(s, "k") {
+		mult = 1024
+		s = s[:len(s)-1]
+	} else if strings.HasSuffix(s, "m") {
+		mult = 1024 * 1024
+		s = s[:len(s)-1]
+	}
+	var n int64
+	fmt.Sscanf(s, "%d", &n)
+	return n * mult
 }

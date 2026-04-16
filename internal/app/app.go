@@ -22,8 +22,8 @@ type Config struct {
 	Convert    bool
 	Rej        string
 	Exc        string
-	Reject     []string
-	Exclude    []string
+	Reject     string
+	Exclude    string
 	URLs       []string
 }
 
@@ -35,7 +35,7 @@ func Run(cfg Config) error {
 		if err != nil {
 			return err
 		}
-		
+
 		defer log.Close()
 
 		os.Setenv("WGET_BG", "1")
@@ -108,10 +108,28 @@ func asyncDownload(cfg Config, urls []string) error {
 // process handles a single URL: mirror or download.
 func process(cfg Config, u string) error {
 	if cfg.Mirror {
+		reject := strings.Split(cfg.Reject, ",")
+		exclude := strings.Split(cfg.Exclude, ",")
+		// Filter out empty strings
+		var rej []string
+		for _, r := range reject {
+			if strings.TrimSpace(r) != "" {
+				rej = append(rej, strings.TrimSpace(r))
+			}
+		}
+		var exc []string
+		for _, e := range exclude {
+			if strings.TrimSpace(e) != "" {
+				exc = append(exc, strings.TrimSpace(e))
+			}
+		}
+		fmt.Println(rej, exc)
 		return mirror.Run(u, mirror.Options{
-			Convert: cfg.Convert,
-			Reject:  cfg.Reject,
-			Exclude: cfg.Exclude,
+			Convert:    cfg.Convert,
+			Reject:     rej,
+			Exclude:    exc,
+			Background: cfg.Background,
+			Limit:      cfg.Limit,
 		})
 	}
 	return download.File(u, download.Options{
