@@ -20,6 +20,8 @@ type Config struct {
 	Background bool
 	Mirror     bool
 	Convert    bool
+	Rej        string
+	Exc        string
 	Reject     []string
 	Exclude    []string
 	URLs       []string

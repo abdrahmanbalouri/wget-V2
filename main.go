@@ -3,9 +3,11 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
+
+	"wget/internal/app"
 
 	"github.com/spf13/pflag"
-	"wget/internal/app"
 )
 
 func main() {
@@ -18,11 +20,19 @@ func main() {
 	pflag.BoolVarP(&cfg.Background, "background", "B", false, "Background mode")
 	pflag.BoolVar(&cfg.Mirror, "mirror", false, "Mirror website")
 	pflag.BoolVar(&cfg.Convert, "convert-links", false, "Convert links for offline")
-	pflag.StringSliceVarP(&cfg.Reject, "reject", "R", nil, "Reject extensions")
-	pflag.StringSliceVarP(&cfg.Exclude, "exclude", "X", nil, "Exclude paths")
+	pflag.StringVarP(&cfg.Rej, "reject", "R", "", "Reject extensions")
+	pflag.StringVarP(&cfg.Exc, "exclude", "X", "", "Exclude paths")
 	pflag.Parse()
 
 	cfg.URLs = pflag.Args()
+	for _, url := range strings.Split(cfg.Exc, ",") {
+		cfg.Exclude = append(cfg.Exclude, strings.TrimSpace(url))
+	}
+	for _, url := range strings.Split(cfg.Rej, ",") {
+		cfg.Reject = append(cfg.Reject, strings.TrimSpace(url))
+	}
+	fmt.Println(cfg.Reject)
+	fmt.Println(cfg.Exclude)
 
 	if err := app.Run(cfg); err != nil {
 		fmt.Fprintln(os.Stderr, err)
