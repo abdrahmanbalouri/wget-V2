@@ -110,6 +110,20 @@ func Run(base string, opts Options) error {
 		}
 	})
 
+	// Inline <style> blocks — extract url() references from CSS inside HTML.
+	c.OnHTML("style", func(e *colly.HTMLElement) {
+		for _, u := range extractCSSURLs(e.Text) {
+			visit(e, u)
+		}
+	})
+
+	// Inline style="..." attributes on any element.
+	c.OnHTML("[style]", func(e *colly.HTMLElement) {
+		for _, u := range extractCSSURLs(e.Attr("style")) {
+			visit(e, u)
+		}
+	})
+
 	// Save each response to disk.
 	c.OnResponse(func(r *colly.Response) {
 		if !opts.Background {
@@ -338,6 +352,14 @@ func convertHTMLLinks(content, currentFile, domain, hostname string) string {
 			}
 		}
 		return sub[1] + `"` + strings.Join(parts, ", ") + `"`
+	})
+	// Convert CSS url() inside inline <style> blocks and style attrs.
+	content = cssURLRe.ReplaceAllStringFunc(content, func(m string) string {
+		sub := cssURLRe.FindStringSubmatch(m)
+		if len(sub) < 2 {
+			return m
+		}
+		return `url("` + toRel(sub[1], currentFile, domain, hostname) + `")`
 	})
 	return content
 }

@@ -1,10 +1,0 @@
- 
-start at 2026-04-16 14:00:38
-sending request... status: 200 OK
-content size: 20900490 (~19.93MB)
-saving to: 20MB.zip
-downloading   0% |                                       | ( 0 B/21 MB) [0s:0s]                                                                               downloading   0% |                           | (50 kB/21 MB, 440 kB/s) [0s:47s]                                                                               downloading   1% |                          | (214 kB/21 MB, 946 kB/s) [0s:21s]                                                                               downloading   4% |█                          | (902 kB/21 MB, 2.7 MB/s) [0s:7s]                                                                               downloading  14% |████                          | (3.1/21 MB, 7.6 MB/s) [0s:2s]                                                                               downloading  28% |████████                       | (6.0/21 MB, 13 MB/s) [0s:1s]                                                                               downloading  46% |██████████████                 | (9.7/21 MB, 13 MB/s) [0s:0s]                                                                               downloading  61% |███████████████████             | (13/21 MB, 13 MB/s) [0s:0s]                                                                               downloading  75% |████████████████████████        | (16/21 MB, 13 MB/s) [0s:0s]                                                                               downloading  92% |█████████████████████████████   | (19/21 MB, 13 MB/s) [0s:0s]                                                                               downloading 100% |████████████████████████████████| (21/21 MB, 27 MB/s)
-
-Download finished: https://assets.01-edu.org/wgetDataSamples/20MB.zip
-
-Download finished: [https://assets.01-edu.org/wgetDataSamples/20MB.zip]
