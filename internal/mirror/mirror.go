@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"path"
@@ -46,6 +48,31 @@ func Run(base string, opts Options) error {
 		Parallelism: 4,
 		Delay:       300 * time.Millisecond,
 	})
+
+	// Apply rate limit at the HTTP transport level so network
+	// downloads are actually throttled (not just disk writes).
+	var netLim *rate.Limiter
+	if opts.Limit != "" {
+		if r := parseRate(opts.Limit); r > 0 {
+			burst := int(r)
+			if burst > 32*1024 {
+				burst = 32 * 1024
+			}
+			netLim = rate.NewLimiter(rate.Limit(r), burst)
+			fmt.Printf("rate limit: %s => %d B/s\n", opts.Limit, r)
+
+			// Wrap the default transport with a throttled dialer.
+			c.WithTransport(&http.Transport{
+				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+					conn, err := (&net.Dialer{Timeout: 30 * time.Second}).DialContext(ctx, network, addr)
+					if err != nil {
+						return nil, err
+					}
+					return &throttledConn{Conn: conn, lim: netLim, chunk: burst}, nil
+				},
+			})
+		}
+	}
 
 	// Track saved files for --convert-links.
 	var mu sync.Mutex
@@ -116,13 +143,11 @@ func Run(base string, opts Options) error {
 		}
 		defer f.Close()
 
-		// Apply rate limit if set.
+		// Apply rate limit to disk writes if set.
 		var src io.Reader = bytes.NewReader(r.Body)
-		if opts.Limit != "" {
-			if r := parseRate(opts.Limit); r > 0 {
-				lim := rate.NewLimiter(rate.Limit(r), int(r))
-				src = &throttle{r: src, lim: lim}
-			}
+		if netLim != nil {
+			burst := netLim.Burst()
+			src = &throttle{r: src, lim: netLim, chunk: burst}
 		}
 
 		if !opts.Background {
@@ -387,14 +412,37 @@ func isTextFile(name string) bool {
 
 // throttle wraps a reader to limit read speed.
 type throttle struct {
-	r   io.Reader
-	lim *rate.Limiter
+	r     io.Reader
+	lim   *rate.Limiter
+	chunk int
 }
 
 func (t *throttle) Read(p []byte) (int, error) {
+	// Cap the read size so WaitN never exceeds burst.
+	if len(p) > t.chunk {
+		p = p[:t.chunk]
+	}
 	n, err := t.r.Read(p)
 	if n > 0 {
 		t.lim.WaitN(context.Background(), n)
+	}
+	return n, err
+}
+
+// throttledConn wraps a net.Conn to throttle Read (download) speed.
+type throttledConn struct {
+	net.Conn
+	lim   *rate.Limiter
+	chunk int
+}
+
+func (c *throttledConn) Read(p []byte) (int, error) {
+	if len(p) > c.chunk {
+		p = p[:c.chunk]
+	}
+	n, err := c.Conn.Read(p)
+	if n > 0 {
+		c.lim.WaitN(context.Background(), n)
 	}
 	return n, err
 }

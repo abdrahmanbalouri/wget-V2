@@ -78,11 +78,18 @@ func download(rawURL string, opt Options) error {
 		r := parseRate(opt.Limit)
 		if r > 0 {
 			fmt.Printf("rate limit: %s => %d B/s\n", opt.Limit, r)
-			lim := rate.NewLimiter(rate.Limit(r), 1)
+			// Burst must be >= any single WaitN(n) call.
+			// Use 32KB or the rate itself, whichever is smaller.
+			burst := int(r)
+			if burst > 32*1024 {
+				burst = 32 * 1024
+			}
+			lim := rate.NewLimiter(rate.Limit(r), burst)
 
 			reader = &throttle{
-				r:   resp.Body,
-				lim: lim,
+				r:     resp.Body,
+				lim:   lim,
+				chunk: burst,
 			}
 		}
 	}
@@ -107,17 +114,20 @@ func download(rawURL string, opt Options) error {
 // -------------------- THROTTLE --------------------
 
 type throttle struct {
-	r   io.Reader
-	lim *rate.Limiter
+	r     io.Reader
+	lim   *rate.Limiter
+	chunk int
 }
 
 func (t *throttle) Read(p []byte) (int, error) {
+	// Cap the read size so WaitN never exceeds burst.
+	if len(p) > t.chunk {
+		p = p[:t.chunk]
+	}
 	n, err := t.r.Read(p)
-
 	if n > 0 {
 		_ = t.lim.WaitN(context.Background(), n)
 	}
-
 	return n, err
 }
 
