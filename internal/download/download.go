@@ -30,13 +30,7 @@ func File(rawURL string, opt Options) error {
 	fmt.Printf("start at %s\n", time.Now().Format("2006-01-02 15:04:05"))
 
 	// background mode
-	if opt.Background {
-		go func() {
-			_ = download(rawURL, opt)
-		}()
-		fmt.Println("running in background...")
-		return nil
-	}
+
 
 	return download(rawURL, opt)
 }
